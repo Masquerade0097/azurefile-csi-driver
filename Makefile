@@ -19,7 +19,7 @@ IMAGE_TAG=$(REGISTRY_NAME)/$(IMAGE_NAME):$(IMAGE_VERSION)
 IMAGE_TAG_LATEST=$(REGISTRY_NAME)/$(IMAGE_NAME):latest
 REV=$(shell git describe --long --tags --dirty)
 
-.PHONY: all azurefile azurefile-container clean
+.PHONY: all azurefile azurefile-container azuredisk azuredisk-container clean
 
 all: azurefile
 
@@ -37,6 +37,11 @@ push-latest: azurefile-container
 	docker push $(IMAGE_TAG)
 	docker tag $(IMAGE_TAG) $(IMAGE_TAG_LATEST)
 	docker push $(IMAGE_TAG_LATEST)
+azuredisk:
+	if [ ! -d ./vendor ]; then dep ensure -vendor-only; fi
+	CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-X github.com/andyzhangx/azurefile-csi-driver/pkg/azuredisk.vendorVersion=$(IMAGE_VERSION) -extldflags "-static"' -o _output/azurediskplugin ./pkg/azurediskplugin
+azuredisk-container: azuredisk
+	docker build --no-cache -t $(IMAGE_TAG) -f ./pkg/azurediskplugin/Dockerfile .
 clean:
 	go clean -r -x
 	-rm -rf _output
