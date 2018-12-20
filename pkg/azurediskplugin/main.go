@@ -29,7 +29,6 @@ func init() {
 
 var (
 	endpoint   = flag.String("endpoint", "unix://tmp/csi.sock", "CSI endpoint")
-	driverName = flag.String("drivername", "disk.csi.azure.com", "name of the driver")
 	nodeID     = flag.String("nodeid", "", "node id")
 )
 
@@ -42,5 +41,5 @@ func main() {
 
 func handle() {
 	driver := azuredisk.GetAzureFileDriver()
-	driver.Run(*driverName, *nodeID, *endpoint)
+	driver.Run(*nodeID, *endpoint)
 }

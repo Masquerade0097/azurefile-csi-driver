@@ -236,7 +236,6 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 }
 
 func (cs *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
-	// Check arguments
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
 	}
@@ -244,32 +243,22 @@ func (cs *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 	if err := cs.Driver.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
 		return nil, fmt.Errorf("invalid delete volume req: %v", req)
 	}
-	volumeID := req.VolumeId
+	diskURI := req.VolumeId
 
-	resourceGroupName, accountName, fileShareName, err := getFileShareInfo(volumeID)
-	if err != nil {
-		return nil, err
+	glog.V(2).Infof("deleting azure disk(%s)", diskURI)
+	if isManagedDisk(diskURI) {
+		if err := cs.cloud.DeleteManagedDisk(diskURI); err != nil {
+			return &csi.DeleteVolumeResponse{}, err
+		}
 	}
-
-	if resourceGroupName == "" {
-		resourceGroupName = cs.cloud.ResourceGroup
-	}
-
-	accountKey, err := GetStorageAccesskey(cs.cloud, accountName, resourceGroupName)
-	if err != nil {
-		return nil, fmt.Errorf("no key for storage account(%s) under resource group(%s), err %v", accountName, resourceGroupName, err)
-	}
-
-	glog.V(2).Infof("deleting azure file(%s) rg(%s) account(%s) volumeID(%s)", fileShareName, resourceGroupName, accountName, volumeID)
-	if err := cs.cloud.DeleteFileShare(accountName, accountKey, fileShareName); err != nil {
-		return nil, err
+	if err := cs.cloud.DeleteBlobDisk(diskURI); err != nil {
+		return &csi.DeleteVolumeResponse{}, err
 	}
 
 	return &csi.DeleteVolumeResponse{}, nil
 }
 
 func (cs *controllerServer) ValidateVolumeCapabilities(ctx context.Context, req *csi.ValidateVolumeCapabilitiesRequest) (*csi.ValidateVolumeCapabilitiesResponse, error) {
-	// Check arguments
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
 	}

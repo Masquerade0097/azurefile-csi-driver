@@ -33,6 +33,8 @@ import (
 )
 
 const (
+	driverName      = "disk.csi.azure.com"
+	topologyKey     = "topology." + driverName + "/zone"
 	accountName     = "accountname"
 	seperator       = "#"
 	fileMode        = "file_mode"
@@ -48,12 +50,6 @@ const (
 	defaultStorageAccountType       = compute.StandardLRS
 	defaultAzureDiskKind            = v1.AzureManagedDisk
 	defaultAzureDataDiskCachingMode = v1.AzureDataDiskCachingNone
-)
-
-const (
-	// todo: use a unified driver name here
-	driverName  = "disk.csi.azure.com"
-	topologyKey = "topology." + driverName + "/zone"
 )
 
 var (
@@ -135,7 +131,7 @@ func NewNodeServer(d *csicommon.CSIDriver, cloud *azure.Cloud) *nodeServer {
 	}
 }
 
-func (f *azureFile) Run(driverName, nodeID, endpoint string) {
+func (f *azureFile) Run(nodeID, endpoint string) {
 	glog.Infof("Driver: %v ", driverName)
 	glog.Infof("Version: %s", vendorVersion)
 
@@ -267,4 +263,11 @@ func getStorageAccount(secrets map[string]string) (string, string, error) {
 	}
 
 	return accountName, accountKey, nil
+}
+
+func isManagedDisk(diskURI string) bool{
+	if len(diskURI) > 4 && strings.ToLower(diskURI[:4]) == "http" {
+		return false
+	}
+	return true
 }
