@@ -18,10 +18,15 @@ package azuredisk
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
+	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/azure"
 
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-10-01/compute"
 	"github.com/andyzhangx/azurefile-csi-driver/pkg/csi-common"
 	"github.com/container-storage-interface/spec/lib/go/csi/v0"
 	"github.com/golang/glog"
@@ -37,6 +42,32 @@ const (
 	defaultFileMode = "0777"
 	defaultDirMode  = "0777"
 	defaultVers     = "3.0"
+)
+
+const (
+	defaultStorageAccountType       = compute.StandardLRS
+	defaultAzureDiskKind            = v1.AzureManagedDisk
+	defaultAzureDataDiskCachingMode = v1.AzureDataDiskCachingNone
+)
+
+const (
+	// todo: use a unified driver name here
+	driverName  = "disk.csi.azure.com"
+	topologyKey = "topology." + driverName + "/zone"
+)
+
+var (
+	supportedCachingModes = sets.NewString(
+		string(api.AzureDataDiskCachingNone),
+		string(api.AzureDataDiskCachingReadOnly),
+		string(api.AzureDataDiskCachingReadWrite))
+
+	supportedDiskKinds = sets.NewString(
+		string(api.AzureSharedBlobDisk),
+		string(api.AzureDedicatedBlobDisk),
+		string(api.AzureManagedDisk))
+
+	lunPathRE = regexp.MustCompile(`/dev/disk/azure/scsi(?:.*)/lun(.+)`)
 )
 
 type azureFile struct {
@@ -121,6 +152,7 @@ func (f *azureFile) Run(driverName, nodeID, endpoint string) {
 	f.driver.AddControllerServiceCapabilities(
 		[]csi.ControllerServiceCapability_RPC_Type{
 			csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
+			csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
 			csi.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT,
 			csi.ControllerServiceCapability_RPC_LIST_SNAPSHOTS,
 		})
@@ -218,11 +250,11 @@ func getStorageAccount(secrets map[string]string) (string, string, error) {
 		switch strings.ToLower(k) {
 		case "accountname":
 			accountName = v
-		case "azurestorageaccountname":	// for compatability with built-in azuredisk plugin
+		case "azurestorageaccountname": // for compatability with built-in azuredisk plugin
 			accountName = v
 		case "accountkey":
 			accountKey = v
-		case "azurestorageaccountkey":  // for compatability with built-in azuredisk plugin
+		case "azurestorageaccountkey": // for compatability with built-in azuredisk plugin
 			accountKey = v
 		}
 	}

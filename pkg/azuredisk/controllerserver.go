@@ -18,12 +18,15 @@ package azuredisk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"k8s.io/api/core/v1"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/azure"
 	"k8s.io/kubernetes/pkg/volume/util"
 
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-10-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2018-07-01/storage"
 	"github.com/andyzhangx/azurefile-csi-driver/pkg/csi-common"
 	"github.com/container-storage-interface/spec/lib/go/csi/v0"
@@ -36,6 +39,22 @@ import (
 
 const (
 	volumeIDTemplate = "%s#%s#%s"
+)
+
+var (
+	// volumeCaps represents how the volume could be accessed.
+	// It is SINGLE_NODE_WRITER since azure disk could only be attached to a single node at any given time.
+	volumeCaps = []csi.VolumeCapability_AccessMode{
+		{
+			Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+		},
+	}
+
+	// controllerCaps represents the capability of controller service
+	controllerCaps = []csi.ControllerServiceCapability_RPC_Type{
+		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
+		csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
+	}
 )
 
 type controllerServer struct {
@@ -59,60 +78,159 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		return nil, status.Error(codes.InvalidArgument, "CreateVolume Volume capabilities must be provided")
 	}
 
+	if !cs.isValidVolumeCapabilities(volumeCapabilities) {
+		return nil, status.Error(codes.InvalidArgument, "Volume capabilities not supported")
+	}
+
 	volSizeBytes := int64(req.GetCapacityRange().GetRequiredBytes())
 	requestGiB := int(util.RoundUpSize(volSizeBytes, 1024*1024*1024))
 
-	parameters := req.GetParameters()
-	var sku, resourceGroup, location, account string
+	var (
+		location, account  string
+		storageAccountType string
+		cachingMode        v1.AzureDataDiskCachingMode
+		strKind            string
+		err                error
+		resourceGroup      string
+		diskIopsReadWrite  string
+		diskMbpsReadWrite  string
+	)
 
-	// Apply ProvisionerParameters (case-insensitive). We leave validation of
-	// the values to the cloud provider.
+	parameters := req.GetParameters()
 	for k, v := range parameters {
 		switch strings.ToLower(k) {
 		case "skuname":
-			sku = v
+			storageAccountType = v
 		case "location":
 			location = v
 		case "storageaccount":
 			account = v
+		case "storageaccounttype":
+			storageAccountType = v
+		case "kind":
+			strKind = v
+		case "cachingmode":
+			cachingMode = v1.AzureDataDiskCachingMode(v)
 		case "resourcegroup":
 			resourceGroup = v
+			/* new zone implementation in csi, these parameters are not needed
+			case "zone":
+				zonePresent = true
+				availabilityZone = v
+			case "zones":
+				zonesPresent = true
+				availabilityZones, err = util.ZonesToSet(v)
+				if err != nil {
+					return nil, fmt.Errorf("error parsing zones %s, must be strings separated by commas: %v", v, err)
+				}
+			case "zoned":
+				strZoned = v
+			*/
+		case "diskiopsreadwrite":
+			diskIopsReadWrite = v
+		case "diskmbpsreadwrite":
+			diskMbpsReadWrite = v
 		default:
-			return nil, fmt.Errorf("invalid option %q", k)
+			return nil, fmt.Errorf("AzureDisk - invalid option %s in storage class", k)
 		}
 	}
 
-	// when use azure file premium, account kind should be specified as FileStorage
-	accountKind := string(storage.StorageV2)
-	if strings.HasPrefix(strings.ToLower(sku), "premium") {
-		accountKind = string(storage.FileStorage)
-	}
-
-	// dynamic provisioning since storage account is not provided by secrets
-	// File share name has a length limit of 63, and it cannot contain two consecutive '-'s.
+	// maxLength = 79 - (4 for ".vhd") = 75
 	// todo: get cluster name
-	fileShareName := util.GenerateVolumeName("pvc-file", uuid.NewUUID().String(), 63)
-	fileShareName = strings.Replace(fileShareName, "--", "-", -1)
+	diskName := util.GenerateVolumeName("pvc-disk", uuid.NewUUID().String(), 75)
 
-	glog.V(2).Infof("begin to create file share(%s) on account(%s) type(%s) rg(%s) location(%s) size(%d)", fileShareName, account, sku, resourceGroup, location, requestGiB)
-	retAccount, _, err := cs.cloud.CreateFileShare(fileShareName, account, sku, accountKind, resourceGroup, location, requestGiB)
+	// normalize values
+	skuName, err := normalizeStorageAccountType(storageAccountType)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create file share(%s) on account(%s) type(%s) rg(%s) location(%s) size(%d)", fileShareName, account, sku, resourceGroup, location, requestGiB)
+		return nil, err
 	}
-	volumeID := fmt.Sprintf(volumeIDTemplate, resourceGroup, retAccount, fileShareName)
+
+	kind, err := normalizeKind(strFirstLetterToUpper(strKind))
+	if err != nil {
+		return nil, err
+	}
+
+	if kind != v1.AzureManagedDisk {
+		if resourceGroup != "" {
+			return nil, errors.New("StorageClass option 'resourceGroup' can be used only for managed disks")
+		}
+	}
+
+	selectedAvailabilityZone := pickAvailabilityZone(req.GetAccessibilityRequirements())
+
+	if cachingMode, err = normalizeCachingMode(cachingMode); err != nil {
+		return nil, err
+	}
+
+	// create disk
+	glog.V(2).Infof("begin to create azure disk(%s) account type(%s) rg(%s) location(%s) size(%d)", diskName, skuName, resourceGroup, location, requestGiB)
+
+	diskURI := ""
+	if kind == v1.AzureManagedDisk {
+		tags := make(map[string]string)
+		/* todo: check where are the tags in CSI
+		if p.options.CloudTags != nil {
+			tags = *(p.options.CloudTags)
+		}
+		*/
+
+		volumeOptions := &azure.ManagedDiskOptions{
+			DiskName:           diskName,
+			StorageAccountType: skuName,
+			ResourceGroup:      resourceGroup,
+			PVCName:            "",
+			SizeGB:             requestGiB,
+			Tags:               tags,
+			AvailabilityZone:   selectedAvailabilityZone,
+			DiskIOPSReadWrite:  diskIopsReadWrite,
+			DiskMBpsReadWrite:  diskMbpsReadWrite,
+		}
+		diskURI, err = cs.cloud.CreateManagedDisk(volumeOptions)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if kind == v1.AzureDedicatedBlobDisk {
+			_, diskURI, _, err = cs.cloud.CreateVolume(name, account, storageAccountType, location, requestGiB)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			diskURI, err = cs.cloud.CreateBlobDisk(name, storage.SkuName(storageAccountType), requestGiB)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	glog.V(2).Infof("create azure disk(%s) account type(%s) rg(%s) location(%s) size(%d) successfully", diskName, skuName, resourceGroup, location, requestGiB)
+
+	/*  todo: block volume support
+	if utilfeature.DefaultFeatureGate.Enabled(features.BlockVolume) {
+		volumeMode = p.options.PVC.Spec.VolumeMode
+		if volumeMode != nil && *volumeMode == v1.PersistentVolumeBlock {
+			// Block volumes should not have any FSType
+			fsType = ""
+		}
+	}
+	*/
 
 	if req.GetVolumeContentSource() != nil {
 		contentSource := req.GetVolumeContentSource()
 		if contentSource.GetSnapshot() != nil {
 		}
 	}
-	glog.V(2).Infof("create file share %s on storage account %s successfully", fileShareName, retAccount)
 
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
-			Id:            volumeID,
+			Id:            diskURI,
 			CapacityBytes: req.GetCapacityRange().GetRequiredBytes(),
 			Attributes:    parameters,
+			AccessibleTopology: []*csi.Topology{
+				{
+					Segments: map[string]string{topologyKey: selectedAvailabilityZone},
+				},
+			},
 		},
 	}, nil
 }
@@ -168,4 +286,97 @@ func (cs *controllerServer) ValidateVolumeCapabilities(ctx context.Context, req 
 		}
 	}
 	return &csi.ValidateVolumeCapabilitiesResponse{Supported: true, Message: ""}, nil
+}
+
+func (cs *controllerServer) isValidVolumeCapabilities(volCaps []*csi.VolumeCapability) bool {
+	hasSupport := func(cap *csi.VolumeCapability) bool {
+		for _, c := range volumeCaps {
+			// todo: Block volume support
+			/* compile error here
+			if blk := c.GetBlock(); blk != nil {
+				return false
+			}
+			*/
+			if c.GetMode() == cap.AccessMode.GetMode() {
+				return true
+			}
+		}
+		return false
+	}
+
+	foundAll := true
+	for _, c := range volCaps {
+		if !hasSupport(c) {
+			foundAll = false
+		}
+	}
+	return foundAll
+}
+
+func normalizeKind(kind string) (v1.AzureDataDiskKind, error) {
+	if kind == "" {
+		return defaultAzureDiskKind, nil
+	}
+
+	if !supportedDiskKinds.Has(kind) {
+		return "", fmt.Errorf("azureDisk - %s is not supported disk kind. Supported values are %s", kind, supportedDiskKinds.List())
+	}
+
+	return v1.AzureDataDiskKind(kind), nil
+}
+
+func normalizeStorageAccountType(storageAccountType string) (compute.DiskStorageAccountTypes, error) {
+	if storageAccountType == "" {
+		return defaultStorageAccountType, nil
+	}
+
+	sku := compute.DiskStorageAccountTypes(storageAccountType)
+	supportedSkuNames := compute.PossibleDiskStorageAccountTypesValues()
+	for _, s := range supportedSkuNames {
+		if sku == s {
+			return sku, nil
+		}
+	}
+
+	return "", fmt.Errorf("azureDisk - %s is not supported sku/storageaccounttype. Supported values are %s", storageAccountType, supportedSkuNames)
+}
+
+func normalizeCachingMode(cachingMode v1.AzureDataDiskCachingMode) (v1.AzureDataDiskCachingMode, error) {
+	if cachingMode == "" {
+		return defaultAzureDataDiskCachingMode, nil
+	}
+
+	if !supportedCachingModes.Has(string(cachingMode)) {
+		return "", fmt.Errorf("azureDisk - %s is not supported cachingmode. Supported values are %s", cachingMode, supportedCachingModes.List())
+	}
+
+	return cachingMode, nil
+}
+
+func strFirstLetterToUpper(str string) string {
+	if len(str) < 2 {
+		return str
+	}
+	return strings.ToUpper(string(str[0])) + str[1:]
+}
+
+// pickAvailabilityZone selects 1 zone given topology requirement.
+// if not found, empty string is returned.
+func pickAvailabilityZone(requirement *csi.TopologyRequirement) string {
+	if requirement == nil {
+		return ""
+	}
+	for _, topology := range requirement.GetPreferred() {
+		zone, exists := topology.GetSegments()[topologyKey]
+		if exists {
+			return zone
+		}
+	}
+	for _, topology := range requirement.GetRequisite() {
+		zone, exists := topology.GetSegments()[topologyKey]
+		if exists {
+			return zone
+		}
+	}
+	return ""
 }
