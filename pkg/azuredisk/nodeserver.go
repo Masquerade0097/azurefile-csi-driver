@@ -37,6 +37,10 @@ import (
 	volutil "k8s.io/kubernetes/pkg/volume/util"
 )
 
+const (
+	defaultFsType = "ext4"
+)
+
 type nodeServer struct {
 	*csicommon.DefaultNodeServer
 	cloud *azure.Cloud
@@ -192,21 +196,75 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 }
 
 func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
-
-	// Check arguments
-	if len(req.GetVolumeId()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
+	glog.V(4).Infof("NodeStageVolume: called with args %+v", *req)
+	diskURI := req.GetVolumeId()
+	if len(diskURI) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Volume ID not provided")
 	}
-	if len(req.GetStagingTargetPath()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "Target path missing in request")
+
+	target := req.GetStagingTargetPath()
+	if len(target) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Staging target not provided")
+	}
+
+	volCap := req.GetVolumeCapability()
+	if volCap == nil {
+		return nil, status.Error(codes.InvalidArgument, "Volume capability not provided")
+	}
+
+	if !isValidVolumeCapabilities([]*csi.VolumeCapability{volCap}) {
+		return nil, status.Error(codes.InvalidArgument, "Volume capability not supported")
+	}
+
+	source, ok := req.PublishInfo["devicePath"]
+	if !ok {
+		return nil, status.Error(codes.InvalidArgument, "Device path not provided")
+	}
+
+	// todo: move this struct to the common driver struct
+	mounter := &mount.SafeFormatAndMount{
+		Interface: mount.New(""),
+		Exec:      mount.NewOsExec(),
+	}
+	// TODO: consider replacing IsLikelyNotMountPoint by IsNotMountPoint
+	notMnt, err := mounter.IsLikelyNotMountPoint(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if errMkDir := mounter.MakeDir(target); errMkDir != nil {
+				msg := fmt.Sprintf("could not create target dir %q: %v", target, errMkDir)
+				return nil, status.Error(codes.Internal, msg)
+			}
+			notMnt = true
+		} else {
+			msg := fmt.Sprintf("could not determine if %q is valid mount point: %v", target, err)
+			return nil, status.Error(codes.Internal, msg)
+		}
+	}
+
+	if !notMnt {
+		msg := fmt.Sprintf("target %q is not a valid mount point", target)
+		return nil, status.Error(codes.InvalidArgument, msg)
+	}
+	// Get fs type that the volume will be formatted with
+	attributes := req.GetVolumeAttributes()
+	fsType, exists := attributes["fsType"]
+	if !exists || fsType == "" {
+		fsType = defaultFsType
+	}
+
+	// FormatAndMount will format only if needed
+	glog.V(2).Infof("NodeStageVolume: formatting %s and mounting at %s", source, target)
+
+	err = mounter.FormatAndMount(source, target, fsType, nil)
+	if err != nil {
+		msg := fmt.Sprintf("could not format %q and mount it at %q", source, target)
+		return nil, status.Error(codes.Internal, msg)
 	}
 
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 
 func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
-
-	// Check arguments
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
 	}

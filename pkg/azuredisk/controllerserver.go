@@ -84,7 +84,7 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		return nil, status.Error(codes.InvalidArgument, "CreateVolume Volume capabilities must be provided")
 	}
 
-	if !cs.isValidVolumeCapabilities(volumeCapabilities) {
+	if !isValidVolumeCapabilities(volumeCapabilities) {
 		return nil, status.Error(codes.InvalidArgument, "Volume capabilities not supported")
 	}
 
@@ -278,7 +278,7 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 	}
 
 	caps := []*csi.VolumeCapability{volCap}
-	if !cs.isValidVolumeCapabilities(caps) {
+	if !isValidVolumeCapabilities(caps) {
 		return nil, status.Error(codes.InvalidArgument, "Volume capability not supported")
 	}
 
@@ -384,7 +384,7 @@ func (cs *controllerServer) ValidateVolumeCapabilities(ctx context.Context, req 
 	return &csi.ValidateVolumeCapabilitiesResponse{Supported: true, Message: ""}, nil
 }
 
-func (cs *controllerServer) isValidVolumeCapabilities(volCaps []*csi.VolumeCapability) bool {
+func isValidVolumeCapabilities(volCaps []*csi.VolumeCapability) bool {
 	hasSupport := func(cap *csi.VolumeCapability) bool {
 		for _, c := range volumeCaps {
 			// todo: Block volume support
