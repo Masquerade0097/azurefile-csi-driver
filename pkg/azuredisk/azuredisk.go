@@ -64,6 +64,8 @@ var (
 		string(api.AzureManagedDisk))
 
 	lunPathRE = regexp.MustCompile(`/dev/disk/azure/scsi(?:.*)/lun(.+)`)
+	managedDiskPathRE = regexp.MustCompile(`.*/subscriptions/(?:.*)/resourceGroups/(?:.*)/providers/Microsoft.Compute/disks/(.+)`)
+	unmanagedDiskPathRE = regexp.MustCompile(`http(?:.*)://(?:.*)/vhds/(.+)`)
 )
 
 type azureFile struct {
@@ -270,4 +272,17 @@ func isManagedDisk(diskURI string) bool{
 		return false
 	}
 	return true
+}
+
+func getDiskName(diskURI string) (string, error) {
+	diskPathRE := managedDiskPathRE
+	if !isManagedDisk(diskURI) {
+		diskPathRE = unmanagedDiskPathRE
+	}
+
+	matches := diskPathRE.FindStringSubmatch(diskURI)
+	if len(matches) != 2 {
+		return "", fmt.Errorf("could not get disk name from %s, correct format: %s", diskURI, diskPathRE)
+	}
+	return matches[1], nil
 }
