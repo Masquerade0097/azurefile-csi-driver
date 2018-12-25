@@ -31,7 +31,6 @@ import (
 
 	"golang.org/x/net/context"
 
-	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume/util"
 )
 
@@ -51,11 +50,10 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	}
 
 	targetPath := req.GetTargetPath()
-	notMnt, err := mount.New("").IsLikelyNotMountPoint(targetPath)
+	notMnt, err := d.mounter.IsLikelyNotMountPoint(targetPath)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	mounter := mount.New("")
 	if !notMnt {
 		// testing original mount point, make sure the mount link is valid
 		if _, err := ioutil.ReadDir(targetPath); err == nil {
@@ -64,7 +62,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		}
 		// todo: mount link is invalid, now unmount and remount later (built-in functionality)
 		glog.Warningf("azureFile - ReadDir %s failed with %v, unmount this directory", targetPath, err)
-		if err := mounter.Unmount(targetPath); err != nil {
+		if err := d.mounter.Unmount(targetPath); err != nil {
 			glog.Errorf("azureFile - Unmount directory %s failed with %v", targetPath, err)
 			return nil, err
 		}
@@ -136,19 +134,19 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		mountOptions = appendDefaultMountOptions(mountOptions)
 	}
 
-	err = mounter.Mount(source, targetPath, "cifs", mountOptions)
+	err = d.mounter.Mount(source, targetPath, "cifs", mountOptions)
 	if err != nil {
-		notMnt, mntErr := mounter.IsLikelyNotMountPoint(targetPath)
+		notMnt, mntErr := d.mounter.IsLikelyNotMountPoint(targetPath)
 		if mntErr != nil {
 			glog.Errorf("IsLikelyNotMountPoint check failed: %v", mntErr)
 			return nil, err
 		}
 		if !notMnt {
-			if mntErr = mounter.Unmount(targetPath); mntErr != nil {
+			if mntErr = d.mounter.Unmount(targetPath); mntErr != nil {
 				glog.Errorf("Failed to unmount: %v", mntErr)
 				return nil, err
 			}
-			notMnt, mntErr := mounter.IsLikelyNotMountPoint(targetPath)
+			notMnt, mntErr := d.mounter.IsLikelyNotMountPoint(targetPath)
 			if mntErr != nil {
 				glog.Errorf("IsLikelyNotMountPoint check failed: %v", mntErr)
 				return nil, err
@@ -178,7 +176,7 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	volumeID := req.GetVolumeId()
 
 	// Unmounting the image
-	err := mount.New("").Unmount(req.GetTargetPath())
+	err := d.mounter.Unmount(req.GetTargetPath())
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -213,16 +211,11 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Error(codes.InvalidArgument, "Device path not provided")
 	}
 
-	// todo: move this struct to the common driver struct
-	mounter := &mount.SafeFormatAndMount{
-		Interface: mount.New(""),
-		Exec:      mount.NewOsExec(),
-	}
 	// TODO: consider replacing IsLikelyNotMountPoint by IsNotMountPoint
-	notMnt, err := mounter.IsLikelyNotMountPoint(target)
+	notMnt, err := d.mounter.IsLikelyNotMountPoint(target)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if errMkDir := mounter.MakeDir(target); errMkDir != nil {
+			if errMkDir := d.mounter.MakeDir(target); errMkDir != nil {
 				msg := fmt.Sprintf("could not create target dir %q: %v", target, errMkDir)
 				return nil, status.Error(codes.Internal, msg)
 			}
@@ -247,7 +240,7 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	// FormatAndMount will format only if needed
 	glog.V(2).Infof("NodeStageVolume: formatting %s and mounting at %s", source, target)
 
-	err = mounter.FormatAndMount(source, target, fsType, nil)
+	err = d.mounter.FormatAndMount(source, target, fsType, nil)
 	if err != nil {
 		msg := fmt.Sprintf("could not format %q and mount it at %q", source, target)
 		return nil, status.Error(codes.Internal, msg)
