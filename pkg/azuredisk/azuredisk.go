@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/azure"
+	"k8s.io/kubernetes/pkg/util/mount"
 
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-10-01/compute"
 	"github.com/andyzhangx/azurefile-csi-driver/pkg/csi-common"
@@ -68,72 +69,34 @@ var (
 	unmanagedDiskPathRE = regexp.MustCompile(`http(?:.*)://(?:.*)/vhds/(.+)`)
 )
 
-type azureFile struct {
-	driver *csicommon.CSIDriver
-
-	ids *identityServer
-	ns  *nodeServer
-	cs  *controllerServer
-
-	cap   []*csi.VolumeCapability_AccessMode
-	cscap []*csi.ControllerServiceCapability
+type Driver struct {
+	csicommon.CSIDriver
+	cloud *azure.Cloud
+	mounter *mount.SafeFormatAndMount
 }
-
-type azureFileVolume struct {
-	VolName string `json:"volName"`
-	VolID   string `json:"volID"`
-	VolSize int64  `json:"volSize"`
-	VolPath string `json:"volPath"`
-}
-
-type azureFileSnapshot struct {
-	Name      string              `json:"name"`
-	Id        string              `json:"id"`
-	VolID     string              `json:"volID"`
-	Path      string              `json:"path"`
-	CreateAt  int64               `json:"createAt"`
-	SizeBytes int64               `json:"sizeBytes"`
-	Status    *csi.SnapshotStatus `json:"status"`
-}
-
-var azureFileVolumes map[string]azureFileVolume
-var azureFileVolumeSnapshots map[string]azureFileSnapshot
 
 var (
-	azureFileDriver *azureFile
 	vendorVersion   = "0.0.1"
 )
 
-func init() {
-	azureFileVolumes = map[string]azureFileVolume{}
-	azureFileVolumeSnapshots = map[string]azureFileSnapshot{}
-}
-
-func GetAzureFileDriver() *azureFile {
-	return &azureFile{}
-}
-
-func NewIdentityServer(d *csicommon.CSIDriver) *identityServer {
-	return &identityServer{
-		DefaultIdentityServer: csicommon.NewDefaultIdentityServer(d),
+// Creates a NewCSIDriver object. Assumes vendor version is equal to driver version &
+// does not support optional driver plugin info manifest field. Refer to CSI spec for more details.
+func NewDriver(nodeID string) *Driver {
+	if nodeID == "" {
+		glog.Fatalln("NodeID missing")
+		return nil
 	}
+
+	driver := Driver{}
+
+	driver.Name = driverName
+	driver.Version = vendorVersion
+	driver.NodeID = nodeID
+
+	return &driver
 }
 
-func NewControllerServer(d *csicommon.CSIDriver, cloud *azure.Cloud) *controllerServer {
-	return &controllerServer{
-		DefaultControllerServer: csicommon.NewDefaultControllerServer(d),
-		cloud:                   cloud,
-	}
-}
-
-func NewNodeServer(d *csicommon.CSIDriver, cloud *azure.Cloud) *nodeServer {
-	return &nodeServer{
-		DefaultNodeServer: csicommon.NewDefaultNodeServer(d),
-		cloud:             cloud,
-	}
-}
-
-func (f *azureFile) Run(nodeID, endpoint string) {
+func (d *Driver) Run(endpoint string) {
 	glog.Infof("Driver: %v ", driverName)
 	glog.Infof("Version: %s", vendorVersion)
 
@@ -141,54 +104,26 @@ func (f *azureFile) Run(nodeID, endpoint string) {
 	if err != nil {
 		glog.Fatalln("failed to get Azure Cloud Provider")
 	}
+	d.cloud = cloud
 
-	// Initialize default library driver
-	f.driver = csicommon.NewCSIDriver(driverName, vendorVersion, nodeID)
-	if f.driver == nil {
-		glog.Fatalln("Failed to initialize azuredisk CSI Driver.")
+	d.mounter = &mount.SafeFormatAndMount{
+		Interface: mount.New(""),
+		Exec:      mount.NewOsExec(),
 	}
-	f.driver.AddControllerServiceCapabilities(
+
+	d.AddControllerServiceCapabilities(
 		[]csi.ControllerServiceCapability_RPC_Type{
 			csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
 			csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
-			csi.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT,
-			csi.ControllerServiceCapability_RPC_LIST_SNAPSHOTS,
+			//csi.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT,
+			//csi.ControllerServiceCapability_RPC_LIST_SNAPSHOTS,
 		})
-	f.driver.AddVolumeCapabilityAccessModes([]csi.VolumeCapability_AccessMode_Mode{csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER})
-
-	// Create GRPC servers
-	f.ids = NewIdentityServer(f.driver)
-	f.ns = NewNodeServer(f.driver, cloud)
-	f.cs = NewControllerServer(f.driver, cloud)
+	d.AddVolumeCapabilityAccessModes([]csi.VolumeCapability_AccessMode_Mode{csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER})
 
 	s := csicommon.NewNonBlockingGRPCServer()
-	s.Start(endpoint, f.ids, f.cs, f.ns)
+	// Driver d act as IdentityServer, ControllerServer and NodeServer
+	s.Start(endpoint, d, d, d)
 	s.Wait()
-}
-
-func getVolumeByID(volumeID string) (azureFileVolume, error) {
-	if azureFileVol, ok := azureFileVolumes[volumeID]; ok {
-		return azureFileVol, nil
-	}
-	return azureFileVolume{}, fmt.Errorf("volume id %s does not exit in the volumes list", volumeID)
-}
-
-func getVolumeByName(volName string) (azureFileVolume, error) {
-	for _, azureFileVol := range azureFileVolumes {
-		if azureFileVol.VolName == volName {
-			return azureFileVol, nil
-		}
-	}
-	return azureFileVolume{}, fmt.Errorf("volume name %s does not exit in the volumes list", volName)
-}
-
-func getSnapshotByName(name string) (azureFileSnapshot, error) {
-	for _, snapshot := range azureFileVolumeSnapshots {
-		if snapshot.Name == name {
-			return snapshot, nil
-		}
-	}
-	return azureFileSnapshot{}, fmt.Errorf("snapshot name %s does not exit in the snapshots list", name)
 }
 
 func getFileShareInfo(id string) (string, string, string, error) {

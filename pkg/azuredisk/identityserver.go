@@ -17,9 +17,47 @@ limitations under the License.
 package azuredisk
 
 import (
-	"github.com/andyzhangx/azurefile-csi-driver/pkg/csi-common"
+	"context"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/container-storage-interface/spec/lib/go/csi/v0"
+	"github.com/golang/glog"
 )
 
-type identityServer struct {
-	*csicommon.DefaultIdentityServer
+func (f *Driver) GetPluginInfo(ctx context.Context, req *csi.GetPluginInfoRequest) (*csi.GetPluginInfoResponse, error) {
+	glog.V(2).Infof("Using default GetPluginInfo")
+
+	if f.Name == "" {
+		return nil, status.Error(codes.Unavailable, "Driver name not configured")
+	}
+
+	if f.Version == "" {
+		return nil, status.Error(codes.Unavailable, "Driver is missing version")
+	}
+
+	return &csi.GetPluginInfoResponse{
+		Name:          f.Name,
+		VendorVersion: f.Version,
+	}, nil
+}
+
+func (f *Driver) Probe(ctx context.Context, req *csi.ProbeRequest) (*csi.ProbeResponse, error) {
+	return &csi.ProbeResponse{}, nil
+}
+
+func (f *Driver) GetPluginCapabilities(ctx context.Context, req *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
+	glog.V(2).Infof("Using default capabilities")
+	return &csi.GetPluginCapabilitiesResponse{
+		Capabilities: []*csi.PluginCapability{
+			{
+				Type: &csi.PluginCapability_Service_{
+					Service: &csi.PluginCapability_Service{
+						Type: csi.PluginCapability_Service_CONTROLLER_SERVICE,
+					},
+				},
+			},
+		},
+	}, nil
 }

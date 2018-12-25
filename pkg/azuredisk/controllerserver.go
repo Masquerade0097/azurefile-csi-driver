@@ -32,7 +32,6 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-10-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2018-07-01/storage"
-	"github.com/andyzhangx/azurefile-csi-driver/pkg/csi-common"
 	"github.com/container-storage-interface/spec/lib/go/csi/v0"
 	"github.com/golang/glog"
 	"github.com/pborman/uuid"
@@ -63,18 +62,12 @@ var (
 	getLunMutex = keymutex.NewHashed(0)
 )
 
-type controllerServer struct {
-	*csicommon.DefaultControllerServer
-	cloud *azure.Cloud
-}
-
-func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-	if err := cs.Driver.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
+func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
+	if err := d.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
 		glog.Errorf("invalid create volume req: %v", req)
 		return nil, err
 	}
 
-	// Validate arguments
 	volumeCapabilities := req.GetVolumeCapabilities()
 	name := req.GetName()
 	if len(name) == 0 {
@@ -191,18 +184,18 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 			DiskIOPSReadWrite:  diskIopsReadWrite,
 			DiskMBpsReadWrite:  diskMbpsReadWrite,
 		}
-		diskURI, err = cs.cloud.CreateManagedDisk(volumeOptions)
+		diskURI, err = d.cloud.CreateManagedDisk(volumeOptions)
 		if err != nil {
 			return nil, err
 		}
 	} else {
 		if kind == v1.AzureDedicatedBlobDisk {
-			_, diskURI, _, err = cs.cloud.CreateVolume(name, account, storageAccountType, location, requestGiB)
+			_, diskURI, _, err = d.cloud.CreateVolume(name, account, storageAccountType, location, requestGiB)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			diskURI, err = cs.cloud.CreateBlobDisk(name, storage.SkuName(storageAccountType), requestGiB)
+			diskURI, err = d.cloud.CreateBlobDisk(name, storage.SkuName(storageAccountType), requestGiB)
 			if err != nil {
 				return nil, err
 			}
@@ -241,23 +234,23 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	}, nil
 }
 
-func (cs *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
+func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
 	}
 
-	if err := cs.Driver.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
+	if err := d.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
 		return nil, fmt.Errorf("invalid delete volume req: %v", req)
 	}
 	diskURI := req.VolumeId
 
 	glog.V(2).Infof("deleting azure disk(%s)", diskURI)
 	if isManagedDisk(diskURI) {
-		if err := cs.cloud.DeleteManagedDisk(diskURI); err != nil {
+		if err := d.cloud.DeleteManagedDisk(diskURI); err != nil {
 			return &csi.DeleteVolumeResponse{}, err
 		}
 	} else {
-		if err := cs.cloud.DeleteBlobDisk(diskURI); err != nil {
+		if err := d.cloud.DeleteBlobDisk(diskURI); err != nil {
 			return &csi.DeleteVolumeResponse{}, err
 		}
 	}
@@ -265,7 +258,7 @@ func (cs *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 	return &csi.DeleteVolumeResponse{}, nil
 }
 
-func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
+func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
 	glog.V(2).Infof("ControllerPublishVolume: called with args %+v", *req)
 	diskURI := req.GetVolumeId()
 	if len(diskURI) == 0 {
@@ -288,12 +281,12 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 	}
 	nodeName := types.NodeName(nodeID)
 
-	instanceid, err := cs.cloud.InstanceID(context.TODO(), nodeName)
+	instanceid, err := d.cloud.InstanceID(context.TODO(), nodeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get azure instance id for node %q (%v)", nodeID, err)
 	}
 
-	lun, err := cs.cloud.GetDiskLun("", diskURI, nodeName)
+	lun, err := d.cloud.GetDiskLun("", diskURI, nodeName)
 	if err == cloudprovider.InstanceNotFound {
 		// Log error and continue with attach
 		glog.Warningf(
@@ -309,7 +302,7 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 		getLunMutex.LockKey(instanceid)
 		defer getLunMutex.UnlockKey(instanceid)
 
-		lun, err = cs.cloud.GetNextDiskLun(nodeName)
+		lun, err = d.cloud.GetNextDiskLun(nodeName)
 		if err != nil {
 			glog.Warningf("no LUN available for instance %q (%v)", nodeName, err)
 			return nil, fmt.Errorf("all LUNs are used, cannot attach volume %q to instance %q (%v)", diskURI, instanceid, err)
@@ -323,7 +316,7 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 			return nil, err
 		}
 
-		err = cs.cloud.AttachDisk(isManagedDisk, diskName, diskURI, nodeName, lun, compute.CachingTypesReadOnly)
+		err = d.cloud.AttachDisk(isManagedDisk, diskName, diskURI, nodeName, lun, compute.CachingTypesReadOnly)
 		if err == nil {
 			glog.V(2).Infof("Attach operation successful: volume %q attached to node %q.", diskURI, nodeName)
 		} else {
@@ -336,7 +329,7 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 	return &csi.ControllerPublishVolumeResponse{PublishInfo: pvInfo}, nil
 }
 
-func (cs *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
+func (d *Driver) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
 	glog.V(2).Infof("ControllerUnpublishVolume: called with args %+v", *req)
 	diskURI := req.GetVolumeId()
 	if len(diskURI) == 0 {
@@ -349,7 +342,7 @@ func (cs *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *
 	}
 	nodeName := types.NodeName(nodeID)
 
-	instanceid, err := cs.cloud.InstanceID(context.TODO(), nodeName)
+	instanceid, err := d.cloud.InstanceID(context.TODO(), nodeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get azure instance id for node %q (%v)", nodeID, err)
 	}
@@ -357,7 +350,7 @@ func (cs *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *
 	getLunMutex.LockKey(instanceid)
 	defer getLunMutex.UnlockKey(instanceid)
 
-	if err := cs.cloud.DetachDiskByName("", diskURI, nodeName); err != nil {
+	if err := d.cloud.DetachDiskByName("", diskURI, nodeName); err != nil {
 		return nil, status.Errorf(codes.Internal, "Could not detach volume %q from node %q: %v", diskURI, nodeID, err)
 	}
 	glog.V(2).Infof("ControllerUnpublishVolume: volume %s detached from node %s", diskURI, nodeID)
@@ -365,15 +358,12 @@ func (cs *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
 
-func (cs *controllerServer) ValidateVolumeCapabilities(ctx context.Context, req *csi.ValidateVolumeCapabilitiesRequest) (*csi.ValidateVolumeCapabilitiesResponse, error) {
+func (d *Driver) ValidateVolumeCapabilities(ctx context.Context, req *csi.ValidateVolumeCapabilitiesRequest) (*csi.ValidateVolumeCapabilitiesResponse, error) {
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
 	}
 	if req.GetVolumeCapabilities() == nil {
 		return nil, status.Error(codes.InvalidArgument, "Volume capabilities missing in request")
-	}
-	if _, ok := azureFileVolumes[req.GetVolumeId()]; !ok {
-		return nil, status.Error(codes.NotFound, "Volume does not exist")
 	}
 
 	for _, cap := range req.VolumeCapabilities {
@@ -475,4 +465,34 @@ func pickAvailabilityZone(requirement *csi.TopologyRequirement) string {
 		}
 	}
 	return ""
+}
+
+// ControllerGetCapabilities implements the default GRPC callout.
+// Default supports all capabilities
+func (d *Driver) ControllerGetCapabilities(ctx context.Context, req *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
+	glog.V(2).Infof("Using default ControllerGetCapabilities")
+
+	return &csi.ControllerGetCapabilitiesResponse{
+		Capabilities: d.Cap,
+	}, nil
+}
+
+func (d *Driver) GetCapacity(ctx context.Context, req *csi.GetCapacityRequest) (*csi.GetCapacityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "")
+}
+
+func (d *Driver) ListVolumes(ctx context.Context, req *csi.ListVolumesRequest) (*csi.ListVolumesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "")
+}
+
+func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "")
+}
+
+func (d *Driver) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshotRequest) (*csi.DeleteSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "")
+}
+
+func (d *Driver) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRequest) (*csi.ListSnapshotsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "")
 }

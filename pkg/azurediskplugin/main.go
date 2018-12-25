@@ -21,6 +21,7 @@ import (
 	"os"
 
 	"github.com/andyzhangx/azurefile-csi-driver/pkg/azuredisk"
+	"github.com/golang/glog"
 )
 
 func init() {
@@ -28,8 +29,8 @@ func init() {
 }
 
 var (
-	endpoint   = flag.String("endpoint", "unix://tmp/csi.sock", "CSI endpoint")
-	nodeID     = flag.String("nodeid", "", "node id")
+	endpoint = flag.String("endpoint", "unix://tmp/csi.sock", "CSI endpoint")
+	nodeID   = flag.String("nodeid", "", "node id")
 )
 
 func main() {
@@ -40,6 +41,9 @@ func main() {
 }
 
 func handle() {
-	driver := azuredisk.GetAzureFileDriver()
-	driver.Run(*nodeID, *endpoint)
+	driver := azuredisk.NewDriver(*nodeID)
+	if driver == nil {
+		glog.Fatalln("Failed to initialize azurefile CSI Driver")
+	}
+	driver.Run(*endpoint)
 }

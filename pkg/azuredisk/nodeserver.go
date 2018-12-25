@@ -23,7 +23,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/andyzhangx/azurefile-csi-driver/pkg/csi-common"
 	"github.com/container-storage-interface/spec/lib/go/csi/v0"
 	"github.com/golang/glog"
 
@@ -32,22 +31,15 @@ import (
 
 	"golang.org/x/net/context"
 
-	"k8s.io/kubernetes/pkg/cloudprovider/providers/azure"
 	"k8s.io/kubernetes/pkg/util/mount"
-	volutil "k8s.io/kubernetes/pkg/volume/util"
+	"k8s.io/kubernetes/pkg/volume/util"
 )
 
 const (
 	defaultFsType = "ext4"
 )
 
-type nodeServer struct {
-	*csicommon.DefaultNodeServer
-	cloud *azure.Cloud
-}
-
-func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
-	// Check arguments
+func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	if req.GetVolumeCapability() == nil {
 		return nil, status.Error(codes.InvalidArgument, "Volume capability missing in request")
 	}
@@ -100,10 +92,10 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		}
 
 		if resourceGroupName == "" {
-			resourceGroupName = ns.cloud.ResourceGroup
+			resourceGroupName = d.cloud.ResourceGroup
 		}
 
-		accountKey, err = GetStorageAccesskey(ns.cloud, accountName, resourceGroupName)
+		accountKey, err = GetStorageAccesskey(d.cloud, accountName, resourceGroupName)
 		if err != nil {
 			return nil, fmt.Errorf("no key for storage account(%s) under resource group(%s), err %v", accountName, resourceGroupName, err)
 		}
@@ -127,7 +119,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	mountOptions := []string{}
 	source := ""
 	osSeparator := string(os.PathSeparator)
-	source = fmt.Sprintf("%s%s%s.file.%s%s%s", osSeparator, osSeparator, accountName, ns.cloud.Environment.StorageEndpointSuffix, osSeparator, fileShareName)
+	source = fmt.Sprintf("%s%s%s.file.%s%s%s", osSeparator, osSeparator, accountName, d.cloud.Environment.StorageEndpointSuffix, osSeparator, fileShareName)
 
 	if runtime.GOOS == "windows" {
 		mountOptions = []string{fmt.Sprintf("AZURE\\%s", accountName), accountKey}
@@ -140,7 +132,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		if readOnly {
 			options = append(options, "ro")
 		}
-		mountOptions = volutil.JoinMountOptions(mountFlags, options)
+		mountOptions = util.JoinMountOptions(mountFlags, options)
 		mountOptions = appendDefaultMountOptions(mountOptions)
 	}
 
@@ -174,7 +166,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
-func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
+func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
 	// Check arguments
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
@@ -195,7 +187,7 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
 
-func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
+func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	glog.V(4).Infof("NodeStageVolume: called with args %+v", *req)
 	diskURI := req.GetVolumeId()
 	if len(diskURI) == 0 {
@@ -264,7 +256,7 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 
-func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
+func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
 	}
@@ -273,4 +265,29 @@ func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 	}
 
 	return &csi.NodeUnstageVolumeResponse{}, nil
+}
+
+
+func (d *Driver) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
+	glog.V(2).Infof("Using default NodeGetCapabilities")
+
+	return &csi.NodeGetCapabilitiesResponse{
+		Capabilities: d.NSCap,
+	}, nil
+}
+
+func (d *Driver) NodeGetId(ctx context.Context, req *csi.NodeGetIdRequest) (*csi.NodeGetIdResponse, error) {
+	glog.V(5).Infof("Using default NodeGetId")
+
+	return &csi.NodeGetIdResponse{
+		NodeId: d.NodeID,
+	}, nil
+}
+
+func (d *Driver) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
+	glog.V(5).Infof("Using default NodeGetInfo")
+
+	return &csi.NodeGetInfoResponse{
+		NodeId: d.NodeID,
+	}, nil
 }
