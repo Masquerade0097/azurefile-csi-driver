@@ -21,6 +21,7 @@ import (
 	"io/ioutil"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi/v0"
 	"github.com/golang/glog"
@@ -30,6 +31,7 @@ import (
 
 	"golang.org/x/net/context"
 
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/volume/util"
 )
 
@@ -58,9 +60,13 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Error(codes.InvalidArgument, "Volume capability not supported")
 	}
 
-	source, ok := req.PublishInfo["devicePath"]
+	devicePath, ok := req.PublishInfo["devicePath"]
 	if !ok {
-		return nil, status.Error(codes.InvalidArgument, "Device path not provided")
+		return nil, status.Error(codes.InvalidArgument, "devicePath not provided")
+	}
+	lun, err := getDiskLUN(devicePath)
+	if err != nil {
+		return nil, err
 	}
 
 	// TODO: consider replacing IsLikelyNotMountPoint by IsNotMountPoint
@@ -89,14 +95,34 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		fsType = defaultFsType
 	}
 
-	// FormatAndMount will format only if needed
-	glog.V(2).Infof("NodeStageVolume: formatting %s and mounting at %s", source, target)
+	io := &osIOHandler{}
+	scsiHostRescan(io, d.mounter.Exec)
 
-	err = d.mounter.FormatAndMount(source, target, fsType, nil)
+	newDevicePath := ""
+	err = wait.Poll(1*time.Second, 2*time.Minute, func() (bool, error) {
+		if newDevicePath, err = findDiskByLun(int(lun), io, d.mounter.Exec); err != nil {
+			return false, fmt.Errorf("azureDisk - findDiskByLun(%v) failed with error(%s)", lun, err)
+		}
+
+		// did we find it?
+		if newDevicePath != "" {
+			return true, nil
+		}
+
+		return false, fmt.Errorf("azureDisk - findDiskByLun(%v) failed within timeout", lun)
+	})
 	if err != nil {
-		msg := fmt.Sprintf("could not format %q and mount it at %q", source, target)
+		return nil, err
+	}
+
+	// FormatAndMount will format only if needed
+	glog.V(2).Infof("NodeStageVolume: formatting %s and mounting at %s", newDevicePath, target)
+	err = d.mounter.FormatAndMount(newDevicePath, target, fsType, nil)
+	if err != nil {
+		msg := fmt.Sprintf("could not format %q and mount it at %q", lun, target)
 		return nil, status.Error(codes.Internal, msg)
 	}
+	glog.V(2).Infof("NodeStageVolume: format %s and mounting at %s successfully.", newDevicePath, target)
 
 	return &csi.NodeStageVolumeResponse{}, nil
 }

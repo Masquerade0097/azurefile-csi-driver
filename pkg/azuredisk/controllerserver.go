@@ -399,53 +399,6 @@ func isValidVolumeCapabilities(volCaps []*csi.VolumeCapability) bool {
 	return foundAll
 }
 
-func normalizeKind(kind string) (v1.AzureDataDiskKind, error) {
-	if kind == "" {
-		return defaultAzureDiskKind, nil
-	}
-
-	if !supportedDiskKinds.Has(kind) {
-		return "", fmt.Errorf("azureDisk - %s is not supported disk kind. Supported values are %s", kind, supportedDiskKinds.List())
-	}
-
-	return v1.AzureDataDiskKind(kind), nil
-}
-
-func normalizeStorageAccountType(storageAccountType string) (compute.DiskStorageAccountTypes, error) {
-	if storageAccountType == "" {
-		return defaultStorageAccountType, nil
-	}
-
-	sku := compute.DiskStorageAccountTypes(storageAccountType)
-	supportedSkuNames := compute.PossibleDiskStorageAccountTypesValues()
-	for _, s := range supportedSkuNames {
-		if sku == s {
-			return sku, nil
-		}
-	}
-
-	return "", fmt.Errorf("azureDisk - %s is not supported sku/storageaccounttype. Supported values are %s", storageAccountType, supportedSkuNames)
-}
-
-func normalizeCachingMode(cachingMode v1.AzureDataDiskCachingMode) (v1.AzureDataDiskCachingMode, error) {
-	if cachingMode == "" {
-		return defaultAzureDataDiskCachingMode, nil
-	}
-
-	if !supportedCachingModes.Has(string(cachingMode)) {
-		return "", fmt.Errorf("azureDisk - %s is not supported cachingmode. Supported values are %s", cachingMode, supportedCachingModes.List())
-	}
-
-	return cachingMode, nil
-}
-
-func strFirstLetterToUpper(str string) string {
-	if len(str) < 2 {
-		return str
-	}
-	return strings.ToUpper(string(str[0])) + str[1:]
-}
-
 // pickAvailabilityZone selects 1 zone given topology requirement.
 // if not found, empty string is returned.
 func pickAvailabilityZone(requirement *csi.TopologyRequirement) string {
