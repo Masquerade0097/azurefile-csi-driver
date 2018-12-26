@@ -21,7 +21,6 @@ import (
 	"io/ioutil"
 	"os"
 	"runtime"
-	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi/v0"
 	"github.com/golang/glog"
@@ -37,153 +36,6 @@ import (
 const (
 	defaultFsType = "ext4"
 )
-
-func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
-	if req.GetVolumeCapability() == nil {
-		return nil, status.Error(codes.InvalidArgument, "Volume capability missing in request")
-	}
-	if len(req.GetVolumeId()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
-	}
-	if len(req.GetTargetPath()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "Target path missing in request")
-	}
-
-	targetPath := req.GetTargetPath()
-	notMnt, err := d.mounter.IsLikelyNotMountPoint(targetPath)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	if !notMnt {
-		// testing original mount point, make sure the mount link is valid
-		if _, err := ioutil.ReadDir(targetPath); err == nil {
-			glog.V(2).Infof("azureFile - already mounted to target %s", targetPath)
-			return &csi.NodePublishVolumeResponse{}, nil
-		}
-		// todo: mount link is invalid, now unmount and remount later (built-in functionality)
-		glog.Warningf("azureFile - ReadDir %s failed with %v, unmount this directory", targetPath, err)
-		if err := d.mounter.Unmount(targetPath); err != nil {
-			glog.Errorf("azureFile - Unmount directory %s failed with %v", targetPath, err)
-			return nil, err
-		}
-		notMnt = true
-	}
-
-	fsType := req.GetVolumeCapability().GetMount().GetFsType()
-
-	readOnly := req.GetReadonly()
-	volumeID := req.GetVolumeId()
-	attrib := req.GetVolumeAttributes()
-	mountFlags := req.GetVolumeCapability().GetMount().GetMountFlags()
-
-	glog.V(2).Infof("target %v\nfstype %v\n\nreadonly %v\nvolumeId %v\nattributes %v\nmountflags %v\n",
-		targetPath, fsType, readOnly, volumeID, attrib, mountFlags)
-
-	var accountName, accountKey, fileShareName string
-
-	secrets := req.GetNodePublishSecrets()
-	if len(secrets) == 0 {
-		var resourceGroupName string
-		resourceGroupName, accountName, fileShareName, err = getFileShareInfo(volumeID)
-		if err != nil {
-			return nil, err
-		}
-
-		if resourceGroupName == "" {
-			resourceGroupName = d.cloud.ResourceGroup
-		}
-
-		accountKey, err = GetStorageAccesskey(d.cloud, accountName, resourceGroupName)
-		if err != nil {
-			return nil, fmt.Errorf("no key for storage account(%s) under resource group(%s), err %v", accountName, resourceGroupName, err)
-		}
-	} else {
-		for k, v := range attrib {
-			switch strings.ToLower(k) {
-			case "sharename":
-				fileShareName = v
-			}
-		}
-		if fileShareName == "" {
-			return nil, fmt.Errorf("could not find sharename from attributes(%v)", attrib)
-		}
-
-		accountName, accountKey, err = getStorageAccount(secrets)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	mountOptions := []string{}
-	source := ""
-	osSeparator := string(os.PathSeparator)
-	source = fmt.Sprintf("%s%s%s.file.%s%s%s", osSeparator, osSeparator, accountName, d.cloud.Environment.StorageEndpointSuffix, osSeparator, fileShareName)
-
-	if runtime.GOOS == "windows" {
-		mountOptions = []string{fmt.Sprintf("AZURE\\%s", accountName), accountKey}
-	} else {
-		if err := os.MkdirAll(targetPath, 0700); err != nil {
-			return nil, err
-		}
-		// parameters suggested by https://azure.microsoft.com/en-us/documentation/articles/storage-how-to-use-files-linux/
-		options := []string{fmt.Sprintf("username=%s,password=%s", accountName, accountKey)}
-		if readOnly {
-			options = append(options, "ro")
-		}
-		mountOptions = util.JoinMountOptions(mountFlags, options)
-		mountOptions = appendDefaultMountOptions(mountOptions)
-	}
-
-	err = d.mounter.Mount(source, targetPath, "cifs", mountOptions)
-	if err != nil {
-		notMnt, mntErr := d.mounter.IsLikelyNotMountPoint(targetPath)
-		if mntErr != nil {
-			glog.Errorf("IsLikelyNotMountPoint check failed: %v", mntErr)
-			return nil, err
-		}
-		if !notMnt {
-			if mntErr = d.mounter.Unmount(targetPath); mntErr != nil {
-				glog.Errorf("Failed to unmount: %v", mntErr)
-				return nil, err
-			}
-			notMnt, mntErr := d.mounter.IsLikelyNotMountPoint(targetPath)
-			if mntErr != nil {
-				glog.Errorf("IsLikelyNotMountPoint check failed: %v", mntErr)
-				return nil, err
-			}
-			if !notMnt {
-				// This is very odd, we don't expect it.  We'll try again next sync loop.
-				glog.Errorf("%s is still mounted, despite call to unmount().  Will try again next sync loop.", targetPath)
-				return nil, err
-			}
-		}
-		os.Remove(targetPath)
-		return nil, err
-	}
-
-	return &csi.NodePublishVolumeResponse{}, nil
-}
-
-func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
-	// Check arguments
-	if len(req.GetVolumeId()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
-	}
-	if len(req.GetTargetPath()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "Target path missing in request")
-	}
-	targetPath := req.GetTargetPath()
-	volumeID := req.GetVolumeId()
-
-	// Unmounting the image
-	err := d.mounter.Unmount(req.GetTargetPath())
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	glog.V(4).Infof("azuredisk: volume %s/%s has been unmounted.", targetPath, volumeID)
-
-	return &csi.NodeUnpublishVolumeResponse{}, nil
-}
 
 func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	glog.V(4).Infof("NodeStageVolume: called with args %+v", *req)
@@ -250,16 +102,124 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 }
 
 func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
-	if len(req.GetVolumeId()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
+	glog.V(2).Infof("NodeUnstageVolume: called with args %+v", *req)
+	volumeID := req.GetVolumeId()
+	if len(volumeID) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Volume ID not provided")
 	}
-	if len(req.GetStagingTargetPath()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "Target path missing in request")
+
+	target := req.GetStagingTargetPath()
+	if len(target) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Staging target not provided")
+	}
+
+	glog.V(2).Infof("NodeUnstageVolume: unmounting %s", target)
+	err := d.mounter.Unmount(target)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Could not unmount target %q: %v", target, err)
 	}
 
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
 
+func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	if req.GetVolumeCapability() == nil {
+		return nil, status.Error(codes.InvalidArgument, "Volume capability missing in request")
+	}
+	if len(req.GetVolumeId()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
+	}
+
+	source := req.GetStagingTargetPath()
+	if len(source) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Staging target not provided")
+	}
+
+	target := req.GetTargetPath()
+	if len(target) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Target path not provided")
+	}
+
+	notMnt, err := d.mounter.IsLikelyNotMountPoint(target)
+	if err != nil && !os.IsNotExist(err) {
+		glog.V(2).Infof("azureDisk - cannot validate mount point for on %s, error: %v", target, err)
+		return nil, err
+	}
+
+	if !notMnt {
+		// testing original mount point, make sure the mount link is valid
+		_, err := ioutil.ReadDir(target)
+		if err == nil {
+			glog.V(2).Infof("azureDisk - already mounted to target %s", target)
+			return &csi.NodePublishVolumeResponse{}, nil
+		}
+		// mount link is invalid, now unmount and remount later
+		glog.Warningf("azureDisk - ReadDir %s failed with %v, unmount this directory", target, err)
+		if err := d.mounter.Unmount(target); err != nil {
+			glog.Errorf("azureDisk - Unmount directory %s failed with %v", target, err)
+			return nil, err
+		}
+		notMnt = true
+	}
+
+	if runtime.GOOS != "windows" {
+		// in windows, we will use mklink to mount, will MkdirAll in Mount func
+		if err := os.MkdirAll(target, 0750); err != nil {
+			glog.Errorf("azureDisk - mkdir failed on target: %s (%v)", target, err)
+			return nil, err
+		}
+	}
+
+	fsType := req.GetVolumeCapability().GetMount().GetFsType()
+
+	readOnly := req.GetReadonly()
+	volumeID := req.GetVolumeId()
+	attrib := req.GetVolumeAttributes()
+	mountFlags := req.GetVolumeCapability().GetMount().GetMountFlags()
+
+	glog.V(2).Infof("target %v\nfstype %v\n\nreadonly %v\nvolumeId %v\nattributes %v\nmountflags %v\n",
+		target, fsType, readOnly, volumeID, attrib, mountFlags)
+
+	mountOptions := []string{"bind"}
+	if req.GetReadonly() {
+		mountOptions = append(mountOptions, "ro")
+	}
+	mountOptions = util.JoinMountOptions(mountFlags, mountOptions)
+
+	glog.V(2).Infof("NodePublishVolume: creating dir %s", target)
+	if err := d.mounter.MakeDir(target); err != nil {
+		return nil, status.Errorf(codes.Internal, "Could not create dir %q: %v", target, err)
+	}
+
+	glog.V(2).Infof("NodePublishVolume: mounting %s at %s", source, target)
+	if err := d.mounter.Mount(source, target, "ext4", mountOptions); err != nil {
+		os.Remove(target)
+		return nil, status.Errorf(codes.Internal, "Could not mount %q at %q: %v", source, target, err)
+	}
+
+	return &csi.NodePublishVolumeResponse{}, nil
+}
+
+func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
+	// Check arguments
+	if len(req.GetVolumeId()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
+	}
+	if len(req.GetTargetPath()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "Target path missing in request")
+	}
+	targetPath := req.GetTargetPath()
+	volumeID := req.GetVolumeId()
+
+	// Unmounting the image
+	err := d.mounter.Unmount(req.GetTargetPath())
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	glog.V(4).Infof("azuredisk: volume %s/%s has been unmounted.", targetPath, volumeID)
+
+	return &csi.NodeUnpublishVolumeResponse{}, nil
+}
 
 func (d *Driver) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
 	glog.V(2).Infof("Using default NodeGetCapabilities")
