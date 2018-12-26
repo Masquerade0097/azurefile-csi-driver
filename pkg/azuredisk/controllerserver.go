@@ -40,10 +40,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const (
-	volumeIDTemplate = "%s#%s#%s"
-)
-
 var (
 	// volumeCaps represents how the volume could be accessed.
 	// It is SINGLE_NODE_WRITER since azure disk could only be attached to a single node at any given time.

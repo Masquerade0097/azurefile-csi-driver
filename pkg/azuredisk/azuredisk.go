@@ -31,16 +31,8 @@ import (
 
 const (
 	driverName      = "disk.csi.azure.com"
+	vendorVersion   = "0.0.1"
 	topologyKey     = "topology." + driverName + "/zone"
-	accountName     = "accountname"
-	seperator       = "#"
-	fileMode        = "file_mode"
-	dirMode         = "dir_mode"
-	gid             = "gid"
-	vers            = "vers"
-	defaultFileMode = "0777"
-	defaultDirMode  = "0777"
-	defaultVers     = "3.0"
 )
 
 var (
@@ -48,17 +40,14 @@ var (
 	unmanagedDiskPathRE = regexp.MustCompile(`http(?:.*)://(?:.*)/vhds/(.+)`)
 )
 
+// Driver implements all interfaces of CSI drivers
 type Driver struct {
 	csicommon.CSIDriver
 	cloud *azure.Cloud
 	mounter *mount.SafeFormatAndMount
 }
 
-var (
-	vendorVersion   = "0.0.1"
-)
-
-// Creates a NewCSIDriver object. Assumes vendor version is equal to driver version &
+// NewDriver Creates a NewCSIDriver object. Assumes vendor version is equal to driver version &
 // does not support optional driver plugin info manifest field. Refer to CSI spec for more details.
 func NewDriver(nodeID string) *Driver {
 	if nodeID == "" {
