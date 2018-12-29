@@ -30,20 +30,20 @@ import (
 )
 
 const (
-	driverName      = "disk.csi.azure.com"
-	vendorVersion   = "0.0.1"
-	topologyKey     = "topology." + driverName + "/zone"
+	driverName    = "disk.csi.azure.com"
+	vendorVersion = "0.0.1"
+	topologyKey   = "topology." + driverName + "/zone"
 )
 
 var (
-	managedDiskPathRE = regexp.MustCompile(`.*/subscriptions/(?:.*)/resourceGroups/(?:.*)/providers/Microsoft.Compute/disks/(.+)`)
+	managedDiskPathRE   = regexp.MustCompile(`.*/subscriptions/(?:.*)/resourceGroups/(?:.*)/providers/Microsoft.Compute/disks/(.+)`)
 	unmanagedDiskPathRE = regexp.MustCompile(`http(?:.*)://(?:.*)/vhds/(.+)`)
 )
 
 // Driver implements all interfaces of CSI drivers
 type Driver struct {
 	csicommon.CSIDriver
-	cloud *azure.Cloud
+	cloud   *azure.Cloud
 	mounter *mount.SafeFormatAndMount
 }
 
@@ -64,6 +64,7 @@ func NewDriver(nodeID string) *Driver {
 	return &driver
 }
 
+// Run driver initialization
 func (d *Driver) Run(endpoint string) {
 	glog.Infof("Driver: %v ", driverName)
 	glog.Infof("Version: %s", vendorVersion)
@@ -94,7 +95,7 @@ func (d *Driver) Run(endpoint string) {
 	s.Wait()
 }
 
-func isManagedDisk(diskURI string) bool{
+func isManagedDisk(diskURI string) bool {
 	if len(diskURI) > 4 && strings.ToLower(diskURI[:4]) == "http" {
 		return false
 	}
